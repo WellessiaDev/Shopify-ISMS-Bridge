@@ -1,0 +1,16 @@
+{
+  "name": "shopify-sms-bridge",
+  "version": "1.0.0",
+  "description": "Shopify order webhook -> SSL Wireless SMS bridge (order confirmation SMS with product details)",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
