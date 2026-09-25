@@ -18,7 +18,7 @@ const SHOPIFY_WEBHOOK_SECRET =
 const SHOPIFY_API_VERSION =
   process.env.SHOPIFY_API_VERSION || '2026-07';
 
-// SSL Wireless SMS Plus
+// SSL Wireless SMS Plus (Dynamic SMS) API
 const SSL_API_URL =
   process.env.SSL_API_URL ||
   'https://smsplus.sslwireless.com/api/v3/send-sms/dynamic';
@@ -26,7 +26,14 @@ const SSL_API_URL =
 const SSL_API_TOKEN = process.env.SSL_API_TOKEN;
 const SSL_SID = process.env.SSL_SID;
 
-// SMS template
+// Message template
+// Available placeholders:
+// {{name}}
+// {{order_number}}
+// {{items}}
+// {{total}}
+// {{currency}}
+
 const MSG_ORDER_CREATED =
   process.env.MSG_ORDER_CREATED ||
   'Hi {{name}}, your order #{{order_number}} ({{items}}) worth {{currency}} {{total}} has been placed successfully. Thank you for shopping with us!';
@@ -34,43 +41,39 @@ const MSG_ORDER_CREATED =
 const PORT = process.env.PORT || 3000;
 
 // ============================================================
+// ORDER FILTER SETTINGS
+// ============================================================
+
+// Only orders created through Shopify Online Store / Web
+const ALLOWED_ORDER_SOURCE = 'web';
+
+// Server deployment/start time
+// Any order created BEFORE this time will be ignored
+const DEPLOYMENT_CUTOFF = new Date();
+
+console.log(
+  '🚀 Deployment cutoff:',
+  DEPLOYMENT_CUTOFF.toISOString()
+);
+
+// ============================================================
 // ENVIRONMENT VALIDATION
 // ============================================================
 
 if (!CLIENT_ID || !CLIENT_SECRET) {
-  console.error('Missing CLIENT_ID or CLIENT_SECRET');
+  console.error('❌ Missing CLIENT_ID or CLIENT_SECRET');
   process.exit(1);
 }
 
 if (!SSL_API_TOKEN || !SSL_SID) {
-  console.error('Missing SSL_API_TOKEN or SSL_SID');
+  console.error('❌ Missing SSL_API_TOKEN or SSL_SID');
   process.exit(1);
 }
 
 if (!SHOPIFY_WEBHOOK_SECRET) {
-  console.error('Missing SHOPIFY_WEBHOOK_SECRET');
+  console.error('❌ Missing SHOPIFY_WEBHOOK_SECRET');
   process.exit(1);
 }
-
-// ============================================================
-// DEPLOYMENT CUTOFF
-// ============================================================
-//
-// Orders created BEFORE this server startup time are ignored.
-// This prevents old/backlog/redelivered webhooks from sending
-// stale SMS after a Railway restart or redeploy.
-//
-// ============================================================
-
-const SERVER_STARTED_AT = new Date();
-
-console.log(
-  `Server started at: ${SERVER_STARTED_AT.toISOString()}`
-);
-
-console.log(
-  'Orders created before this time will be skipped by the webhook.'
-);
 
 // ============================================================
 // SHOPIFY TOKEN CACHE
@@ -82,6 +85,15 @@ let SHOPIFY_EXPIRES_AT = 0;
 // ============================================================
 // DUPLICATE PROTECTION
 // ============================================================
+//
+// Stores orders handled during current deployment.
+//
+// Important:
+// This is memory-only.
+// If Railway/container restarts, this Map becomes empty.
+//
+// Deployment cutoff protects against old orders being processed.
+//
 
 const submittedOrders = new Map();
 
@@ -92,6 +104,7 @@ const submittedOrders = new Map();
 app.use(
   express.json({
     limit: '1mb',
+
     verify: (req, res, buf) => {
       req.rawBody = Buffer.from(buf);
     }
@@ -109,15 +122,17 @@ function verifyShopifyWebhook(req) {
 
     if (!hmacHeader) {
       console.error(
-        'Missing X-Shopify-Hmac-Sha256 header'
+        '❌ Missing X-Shopify-Hmac-Sha256 header'
       );
+
       return false;
     }
 
     if (!req.rawBody) {
       console.error(
-        'Raw webhook body is missing'
+        '❌ Raw webhook body is missing'
       );
+
       return false;
     }
 
@@ -146,7 +161,9 @@ function verifyShopifyWebhook(req) {
       receivedBuffer,
       generatedBuffer
     );
+
   } catch (error) {
+
     console.error(
       'Webhook HMAC verification error:',
       error.message
@@ -161,6 +178,7 @@ function verifyShopifyWebhook(req) {
 // ============================================================
 
 async function getShopifyToken() {
+
   if (
     SHOPIFY_TOKEN &&
     Date.now() <
@@ -170,36 +188,45 @@ async function getShopifyToken() {
   }
 
   console.log(
-    'Requesting Shopify access token...'
+    '🔐 Requesting Shopify access token...'
   );
 
   const tokenUrl =
     `https://${SHOP}.myshopify.com/admin/oauth/access_token`;
 
-  const body = new URLSearchParams({
-    grant_type: 'client_credentials',
-    client_id: CLIENT_ID,
-    client_secret: CLIENT_SECRET
-  });
+  const body =
+    new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET
+    });
 
-  const response = await fetch(
-    tokenUrl,
-    {
+  const response =
+    await fetch(tokenUrl, {
+
       method: 'POST',
+
       headers: {
         'Content-Type':
           'application/x-www-form-urlencoded'
       },
-      body: body.toString()
-    }
-  );
 
-  const data = await response.json();
+      body: body.toString()
+
+    });
+
+  const data =
+    await response.json();
 
   if (!response.ok) {
+
     console.error(
-      'Shopify token response:',
-      JSON.stringify(data, null, 2)
+      '❌ Shopify token response:',
+      JSON.stringify(
+        data,
+        null,
+        2
+      )
     );
 
     throw new Error(
@@ -222,11 +249,10 @@ async function getShopifyToken() {
 
   SHOPIFY_EXPIRES_AT =
     Date.now() +
-    (data.expires_in || 86400) *
-      1000;
+    (data.expires_in || 86400) * 1000;
 
   console.log(
-    'Shopify access token obtained'
+    '✅ Shopify access token obtained'
   );
 
   return SHOPIFY_TOKEN;
@@ -235,21 +261,27 @@ async function getShopifyToken() {
 // ============================================================
 // SHOPIFY API REQUEST
 // ============================================================
+//
+// This is retained only for optional test/manual API endpoints.
+//
+// The ORDERS_CREATE webhook DOES NOT use this function.
+// It uses the webhook payload directly.
+//
 
 async function shopifyRequest(
   endpoint,
   options = {}
 ) {
+
   const token =
     await getShopifyToken();
 
   const url =
-    `https://${SHOP}.myshopify.com/admin/api/` +
-    `${SHOPIFY_API_VERSION}/${endpoint}`;
+    `https://${SHOP}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}/${endpoint}`;
 
-  const response = await fetch(
-    url,
-    {
+  const response =
+    await fetch(url, {
+
       method:
         options.method || 'GET',
 
@@ -263,11 +295,14 @@ async function shopifyRequest(
         ...(options.headers || {})
       },
 
-      body: options.body
-        ? JSON.stringify(options.body)
-        : undefined
-    }
-  );
+      body:
+        options.body
+          ? JSON.stringify(
+              options.body
+            )
+          : undefined
+
+    });
 
   const text =
     await response.text();
@@ -275,16 +310,22 @@ async function shopifyRequest(
   let data;
 
   try {
-    data = text
-      ? JSON.parse(text)
-      : {};
+
+    data =
+      text
+        ? JSON.parse(text)
+        : {};
+
   } catch {
+
     data = {
       raw: text
     };
+
   }
 
   if (!response.ok) {
+
     const error =
       new Error(
         `Shopify API ${response.status}`
@@ -303,7 +344,7 @@ async function shopifyRequest(
 }
 
 // ============================================================
-// SSL WIRELESS SMS
+// SSL WIRELESS SMS REQUEST
 // ============================================================
 
 async function sendSms(
@@ -311,7 +352,9 @@ async function sendSms(
   message,
   csmsId
 ) {
+
   const body = {
+
     api_token:
       SSL_API_TOKEN,
 
@@ -320,14 +363,9 @@ async function sendSms(
 
     sms: [
       {
-        msisdn:
-          phone,
-
-        text:
-          message,
-
-        csms_id:
-          csmsId
+        msisdn: phone,
+        text: message,
+        csms_id: csmsId
       }
     ]
   };
@@ -336,6 +374,7 @@ async function sendSms(
     await fetch(
       SSL_API_URL,
       {
+
         method: 'POST',
 
         headers: {
@@ -345,16 +384,29 @@ async function sendSms(
 
         body:
           JSON.stringify(body)
+
       }
     );
 
-  const data =
-    await response.json();
+  let data;
+
+  try {
+
+    data =
+      await response.json();
+
+  } catch {
+
+    throw new Error(
+      'SSL Wireless returned invalid JSON'
+    );
+  }
 
   if (
-    data.status !==
-    'SUCCESS'
+    !response.ok ||
+    data.status !== 'SUCCESS'
   ) {
+
     const detail =
       (
         data.smsinfo &&
@@ -362,12 +414,15 @@ async function sendSms(
         data.smsinfo[0]
           .status_message
       ) ||
-      data.error_message;
+      data.error_message ||
+      data.message;
 
     const error =
       new Error(
         `SSL Wireless rejected the SMS: ${
-          detail || data.status
+          detail ||
+          data.status ||
+          response.status
         }`
       );
 
@@ -383,14 +438,33 @@ async function sendSms(
 // ============================================================
 // NORMALIZE BANGLADESH PHONE
 // ============================================================
+//
+// Examples:
+//
+// +8801741563884
+// 8801741563884
+// 01741563884
+//
+// Output:
+//
+// 8801741563884
+//
+// ============================================================
 
 function normalizePhone(phone) {
+
   if (!phone) {
     return '';
   }
 
   let value =
     String(phone).trim();
+
+  // Remove:
+  // spaces
+  // hyphens
+  // brackets
+  // plus symbol
 
   value =
     value.replace(
@@ -401,19 +475,28 @@ function normalizePhone(phone) {
   if (
     value.startsWith('880')
   ) {
-    // Already has country code
+
+    // Already normalized
+
   } else if (
     value.startsWith('0')
   ) {
+
     value =
       '880' +
       value.substring(1);
+
   } else if (
     value.length === 10
   ) {
+
     value =
       '880' + value;
+
   }
+
+  // Bangladesh mobile number
+  // with country code = 13 digits
 
   if (
     !/^\d{13}$/.test(value)
@@ -425,12 +508,48 @@ function normalizePhone(phone) {
 }
 
 // ============================================================
-// BUILD SMS
+// SAFE TEMPLATE REPLACEMENT
+// ============================================================
+
+function replaceTemplate(
+  template,
+  values
+) {
+
+  let result =
+    template;
+
+  for (
+    const [key, value]
+    of Object.entries(values)
+  ) {
+
+    result =
+      result.replaceAll(
+        `{{${key}}}`,
+        String(value ?? '')
+      );
+
+  }
+
+  return result;
+}
+
+// ============================================================
+// BUILD SMS FROM SHOPIFY WEBHOOK ORDER
+// ============================================================
+//
+// No extra Shopify order lookup.
+//
+// Everything comes directly from:
+// req.body
+//
 // ============================================================
 
 function buildOrderSms(
   shopifyOrder
 ) {
+
   const shipping =
     shopifyOrder.shipping_address ||
     {};
@@ -443,17 +562,38 @@ function buildOrderSms(
     shopifyOrder.line_items ||
     [];
 
+  // ----------------------------------------------------------
+  // Recipient Name
+  // ----------------------------------------------------------
+
   const recipientName =
+
     shipping.name ||
+
     billing.name ||
-    shopifyOrder.customer?.first_name ||
+
+    (
+      shopifyOrder.customer
+        ?.first_name
+    ) ||
+
     'Customer';
 
+  // ----------------------------------------------------------
+  // Recipient Phone
+  // ----------------------------------------------------------
+
   const recipientPhone =
+
     shipping.phone ||
+
     billing.phone ||
-    shopifyOrder.customer?.phone ||
+
+    shopifyOrder.customer
+      ?.phone ||
+
     shopifyOrder.phone ||
+
     '';
 
   const cleanedPhone =
@@ -461,22 +601,35 @@ function buildOrderSms(
       recipientPhone
     );
 
+  // ----------------------------------------------------------
+  // Products
+  // ----------------------------------------------------------
+
   const itemsDescription =
     items
-      .map((item) => {
-        const title =
-          item.title ||
-          item.name ||
-          'Product';
+      .map(
+        (item) => {
 
-        const quantity =
-          Number(
-            item.quantity
-          ) || 1;
+          const title =
+            item.title ||
+            item.name ||
+            'Product';
 
-        return `${title} x${quantity}`;
-      })
+          const quantity =
+            Number(
+              item.quantity
+            ) || 1;
+
+          return (
+            `${title} x${quantity}`
+          );
+        }
+      )
       .join(', ');
+
+  // ----------------------------------------------------------
+  // Total
+  // ----------------------------------------------------------
 
   const totalPrice =
     shopifyOrder.total_price ||
@@ -486,33 +639,46 @@ function buildOrderSms(
     shopifyOrder.currency ||
     '';
 
+  // ----------------------------------------------------------
+  // Order Number
+  // ----------------------------------------------------------
+
+  const orderNumber =
+
+    shopifyOrder.order_number ||
+
+    shopifyOrder.name ||
+
+    shopifyOrder.id;
+
+  // ----------------------------------------------------------
+  // Message
+  // ----------------------------------------------------------
+
   const message =
-    MSG_ORDER_CREATED
-      .replace(
-        '{{name}}',
-        recipientName
-      )
-      .replace(
-        '{{order_number}}',
-        shopifyOrder.order_number ||
-          shopifyOrder.name ||
-          shopifyOrder.id
-      )
-      .replace(
-        '{{items}}',
-        itemsDescription ||
-          'your items'
-      )
-      .replace(
-        '{{total}}',
-        totalPrice
-      )
-      .replace(
-        '{{currency}}',
-        currency
-      );
+    replaceTemplate(
+      MSG_ORDER_CREATED,
+      {
+        name:
+          recipientName,
+
+        order_number:
+          orderNumber,
+
+        items:
+          itemsDescription ||
+          'your items',
+
+        total:
+          totalPrice,
+
+        currency:
+          currency
+      }
+    );
 
   return {
+
     phone:
       cleanedPhone,
 
@@ -520,7 +686,12 @@ function buildOrderSms(
 
     recipientName,
 
-    itemsDescription
+    itemsDescription,
+
+    totalPrice,
+
+    currency
+
   };
 }
 
@@ -531,45 +702,71 @@ function buildOrderSms(
 app.get(
   '/',
   (req, res) => {
+
     res.json({
       success: true,
       status: 'ok',
       service:
         'Shopify SMS Bridge',
+
       shop:
         SHOP,
+
       shopify_api_version:
         SHOPIFY_API_VERSION,
-      webhook:
-        '/webhooks/orders-create',
-      server_started_at:
-        SERVER_STARTED_AT.toISOString()
-    });
-  }
-);
 
-app.get(
-  '/health',
-  (req, res) => {
-    res.json({
-      success: true,
-      status: 'healthy',
-      timestamp:
-        new Date().toISOString(),
-      server_started_at:
-        SERVER_STARTED_AT.toISOString()
+      allowed_order_source:
+        ALLOWED_ORDER_SOURCE,
+
+      deployment_cutoff:
+        DEPLOYMENT_CUTOFF
+          .toISOString(),
+
+      webhook:
+        '/webhooks/orders-create'
     });
+
   }
 );
 
 // ============================================================
-// OUTBOUND IP
+// HEALTH
+// ============================================================
+
+app.get(
+  '/health',
+  (req, res) => {
+
+    res.json({
+
+      success: true,
+
+      status:
+        'healthy',
+
+      timestamp:
+        new Date()
+          .toISOString(),
+
+      deployment_cutoff:
+        DEPLOYMENT_CUTOFF
+          .toISOString()
+
+    });
+
+  }
+);
+
+// ============================================================
+// SHOW OUTBOUND SERVER IP
 // ============================================================
 
 app.get(
   '/api/my-ip',
   async (req, res) => {
+
     try {
+
       const response =
         await fetch(
           'https://api.ipify.org?format=json'
@@ -579,33 +776,61 @@ app.get(
         await response.json();
 
       res.json({
+
         success: true,
+
         outbound_ip:
           data.ip
+
       });
+
     } catch (error) {
-      res.status(500).json({
-        success: false,
-        error:
-          error.message
-      });
+
+      res
+        .status(500)
+        .json({
+
+          success: false,
+
+          error:
+            error.message
+
+        });
+
     }
+
   }
 );
 
 // ============================================================
-// SHOPIFY ORDERS/CREATE WEBHOOK
+// SHOPIFY ORDERS_CREATE WEBHOOK
+// ============================================================
+//
+// CONDITIONS:
+//
+// 1. Valid Shopify HMAC
+//
+// 2. source_name must be "web"
+//
+// 3. created_at must be AFTER server deployment
+//
+// 4. SMS is built directly from webhook body
+//
+// 5. NO old order lookup
+//
 // ============================================================
 
 app.post(
   '/webhooks/orders-create',
+
   async (req, res) => {
+
     console.log(
       '\n============================================'
     );
 
     console.log(
-      'SHOPIFY ORDERS/CREATE WEBHOOK RECEIVED'
+      '📩 SHOPIFY ORDERS/CREATE WEBHOOK RECEIVED'
     );
 
     console.log(
@@ -613,27 +838,37 @@ app.post(
     );
 
     // --------------------------------------------------------
-    // HMAC
+    // Verify HMAC
     // --------------------------------------------------------
 
     const valid =
       verifyShopifyWebhook(req);
 
     if (!valid) {
+
       console.error(
-        'Invalid Shopify webhook signature'
+        '❌ Invalid Shopify webhook signature'
       );
 
-      return res.status(401).json({
-        success: false,
-        error:
-          'Invalid Shopify webhook signature'
-      });
+      return res
+        .status(401)
+        .json({
+
+          success: false,
+
+          error:
+            'Invalid Shopify webhook signature'
+
+        });
     }
 
     console.log(
-      'Shopify webhook signature verified'
+      '✅ Shopify webhook signature verified'
     );
+
+    // --------------------------------------------------------
+    // Order payload
+    // --------------------------------------------------------
 
     const shopifyOrder =
       req.body;
@@ -642,15 +877,21 @@ app.post(
       !shopifyOrder ||
       !shopifyOrder.id
     ) {
+
       console.error(
-        'Invalid Shopify order webhook'
+        '❌ Invalid Shopify order webhook'
       );
 
-      return res.status(400).json({
-        success: false,
-        error:
-          'Invalid Shopify order webhook payload'
-      });
+      return res
+        .status(400)
+        .json({
+
+          success: false,
+
+          error:
+            'Invalid Shopify order webhook payload'
+
+        });
     }
 
     const shopifyOrderId =
@@ -659,227 +900,279 @@ app.post(
       );
 
     console.log(
-      'Shopify Order ID:',
+      '🛒 Shopify Order ID:',
       shopifyOrderId
     );
 
     console.log(
-      'Shopify Order Name:',
+      '🧾 Shopify Order Name:',
       shopifyOrder.name ||
-        'N/A'
+      'N/A'
     );
 
-    // ========================================================
-    // DEPLOYMENT CUTOFF
-    // ========================================================
+    console.log(
+      '🌐 Order Source:',
+      shopifyOrder.source_name ||
+      'N/A'
+    );
 
-    const orderCreatedAt =
-      shopifyOrder.created_at
-        ? new Date(
-            shopifyOrder.created_at
-          )
-        : null;
+    console.log(
+      '🕐 Created At:',
+      shopifyOrder.created_at ||
+      'N/A'
+    );
+
+    // --------------------------------------------------------
+    // ACK SHOPIFY IMMEDIATELY
+    // --------------------------------------------------------
+    //
+    // Shopify receives HTTP 200 immediately.
+    //
+    // SMS work continues afterward.
+    //
+
+    res
+      .status(200)
+      .json({
+
+        success: true,
+
+        received: true,
+
+        shopify_order_id:
+          shopifyOrderId
+
+      });
+
+    // --------------------------------------------------------
+    // WEB SOURCE ONLY
+    // --------------------------------------------------------
+
+    const orderSource =
+      String(
+        shopifyOrder.source_name ||
+        ''
+      )
+        .trim()
+        .toLowerCase();
 
     if (
-      !orderCreatedAt ||
+      orderSource !==
+      ALLOWED_ORDER_SOURCE
+    ) {
+
+      console.log(
+        `⏭️ Order ${shopifyOrderId} ignored`
+      );
+
+      console.log(
+        `   Source: ${orderSource || 'unknown'}`
+      );
+
+      console.log(
+        '   Only source_name="web" is allowed'
+      );
+
+      return;
+    }
+
+    console.log(
+      '✅ Order source accepted: web'
+    );
+
+    // --------------------------------------------------------
+    // DEPLOYMENT CUTOFF
+    // --------------------------------------------------------
+
+    if (
+      !shopifyOrder.created_at
+    ) {
+
+      console.warn(
+        `⚠️ Order ${shopifyOrderId} has no created_at`
+      );
+
+      console.warn(
+        '   SMS skipped'
+      );
+
+      return;
+    }
+
+    const orderCreatedAt =
+      new Date(
+        shopifyOrder.created_at
+      );
+
+    if (
       Number.isNaN(
         orderCreatedAt.getTime()
       )
     ) {
-      console.log(
-        'Skipping SMS - invalid or missing created_at'
+
+      console.warn(
+        `⚠️ Invalid created_at for order ${shopifyOrderId}`
       );
 
-      return res.status(200).json({
-        success: true,
-        skipped: true,
-        reason:
-          'Missing or invalid order created_at',
-        shopify_order_id:
-          shopifyOrderId
-      });
+      return;
     }
 
     console.log(
-      'Order Created At:',
-      orderCreatedAt.toISOString()
+      '📅 Order time:',
+      orderCreatedAt
+        .toISOString()
     );
 
     console.log(
-      'Server Started At:',
-      SERVER_STARTED_AT.toISOString()
+      '🚀 Deployment:',
+      DEPLOYMENT_CUTOFF
+        .toISOString()
     );
+
+    // Ignore anything older than this deployment
 
     if (
       orderCreatedAt <
-      SERVER_STARTED_AT
+      DEPLOYMENT_CUTOFF
     ) {
+
       console.log(
-        'Skipping SMS - order was created before server startup'
+        `⏭️ OLD ORDER ${shopifyOrderId} ignored`
       );
 
-      return res.status(200).json({
-        success: true,
-        skipped: true,
-        reason:
-          'Order created before server startup',
+      console.log(
+        '   Reason: created before deployment'
+      );
 
-        shopify_order_id:
-          shopifyOrderId,
-
-        order_created_at:
-          orderCreatedAt.toISOString(),
-
-        server_started_at:
-          SERVER_STARTED_AT.toISOString()
-      });
+      return;
     }
 
     console.log(
-      'Order passed deployment cutoff'
+      '✅ Order passed deployment cutoff'
     );
 
-    // ========================================================
-    // ONLINE STORE / WEB ORDER CHECK
-    // ========================================================
-
-    const orderSource =
-      shopifyOrder.source_name ||
-      '';
-
-    console.log(
-      'Order Source:',
-      orderSource ||
-        'N/A'
-    );
-
-    if (
-      orderSource !==
-      'web'
-    ) {
-      console.log(
-        `Skipping SMS - order source is "${orderSource}", not web`
-      );
-
-      return res.status(200).json({
-        success: true,
-        skipped: true,
-        reason:
-          `order source is "${orderSource}", not web`,
-
-        source_name:
-          orderSource ||
-          null,
-
-        shopify_order_id:
-          shopifyOrderId
-      });
-    }
-
-    console.log(
-      'Online Store/Web order confirmed'
-    );
-
-    console.log(
-      'Automatic SMS is allowed'
-    );
-
-    // ========================================================
+    // --------------------------------------------------------
     // DUPLICATE PROTECTION
-    // ========================================================
+    // --------------------------------------------------------
 
     if (
       submittedOrders.has(
         shopifyOrderId
       )
     ) {
+
       console.log(
-        'SMS already sent for this order'
+        `⚠️ Order ${shopifyOrderId} already processed`
       );
 
-      return res.status(200).json({
-        success: true,
-        duplicate: true,
-        message:
-          'SMS was already sent for this order',
-        previous_result:
-          submittedOrders.get(
-            shopifyOrderId
-          )
-      });
+      return;
     }
 
-    // ========================================================
-    // BUILD SMS
-    // ========================================================
+    // Lock immediately before async SMS call
+
+    submittedOrders.set(
+      shopifyOrderId,
+      {
+        status:
+          'processing',
+
+        started_at:
+          new Date()
+            .toISOString()
+      }
+    );
+
+    // --------------------------------------------------------
+    // BUILD SMS DIRECTLY FROM WEBHOOK
+    // --------------------------------------------------------
 
     const {
       phone,
       message,
       recipientName,
-      itemsDescription
+      itemsDescription,
+      totalPrice,
+      currency
     } =
       buildOrderSms(
         shopifyOrder
       );
 
     console.log(
-      'Recipient:',
+      '👤 Recipient:',
       recipientName
     );
 
     console.log(
-      'Phone:',
+      '📱 Phone:',
       phone ||
-        'MISSING/INVALID'
+      'MISSING/INVALID'
     );
 
     console.log(
-      'Items:',
+      '🛍️ Items:',
       itemsDescription ||
-        'N/A'
+      'N/A'
     );
 
     console.log(
-      'Message:',
+      '💰 Total:',
+      currency,
+      totalPrice
+    );
+
+    console.log(
+      '💬 Message:',
       message
     );
 
-    // ========================================================
-    // ACKNOWLEDGE SHOPIFY
-    // ========================================================
-
-    res.status(200).json({
-      success: true,
-      shopify_order_id:
-        shopifyOrderId,
-      source_name:
-        orderSource
-    });
-
-    // ========================================================
-    // PHONE CHECK
-    // ========================================================
+    // --------------------------------------------------------
+    // INVALID PHONE
+    // --------------------------------------------------------
 
     if (!phone) {
+
       console.warn(
-        `No valid phone number for order ${shopifyOrderId}, skipping SMS`
+        `⚠️ No valid BD phone for order ${shopifyOrderId}`
+      );
+
+      submittedOrders.set(
+        shopifyOrderId,
+        {
+
+          success: false,
+
+          status:
+            'skipped',
+
+          reason:
+            'invalid_phone',
+
+          shopify_order_id:
+            shopifyOrderId
+
+        }
       );
 
       return;
     }
 
-    // ========================================================
-    // SEND SMS
-    // ========================================================
+    // --------------------------------------------------------
+    // SMS ID
+    // --------------------------------------------------------
 
     const csmsId =
       `${shopifyOrderId}-${Date.now()}`
         .slice(0, 20);
 
+    // --------------------------------------------------------
+    // SEND SMS
+    // --------------------------------------------------------
+
     try {
+
       console.log(
-        'Sending SMS via SSL Wireless...'
+        '\n📨 Sending SMS via SSL Wireless...'
       );
 
       const result =
@@ -890,7 +1183,12 @@ app.post(
         );
 
       const smsResult = {
-        success: true,
+
+        success:
+          true,
+
+        status:
+          'sent',
 
         shopify_order_id:
           shopifyOrder.id,
@@ -898,13 +1196,24 @@ app.post(
         shopify_order_name:
           shopifyOrder.name,
 
-        source_name:
+        source:
           orderSource,
+
+        order_created_at:
+          shopifyOrder.created_at,
+
+        deployment_cutoff:
+          DEPLOYMENT_CUTOFF
+            .toISOString(),
 
         phone,
 
+        csms_id:
+          csmsId,
+
         sms_response:
           result
+
       };
 
       submittedOrders.set(
@@ -913,7 +1222,15 @@ app.post(
       );
 
       console.log(
-        'SHOPIFY WEB ORDER -> SMS SUCCESS'
+        '\n============================================'
+      );
+
+      console.log(
+        '✅ SHOPIFY WEB ORDER → SMS SUCCESS'
+      );
+
+      console.log(
+        '============================================'
       );
 
       console.log(
@@ -923,448 +1240,220 @@ app.post(
           2
         )
       );
+
     } catch (error) {
+
       console.error(
-        'SMS SEND FAILED'
+        '\n❌ SMS SEND FAILED'
       );
 
       console.error(
         error.data ||
-          error.message
+        error.message
       );
 
       submittedOrders.set(
         shopifyOrderId,
         {
-          success: false,
+
+          success:
+            false,
+
+          status:
+            'failed',
 
           shopify_order_id:
             shopifyOrderId,
 
           error:
-            error.message
+            error.message,
+
+          details:
+            error.data ||
+            null
+
         }
       );
     }
+
   }
 );
 
 // ============================================================
-// TEST SHOPIFY
+// TEST SHOPIFY CONNECTION
 // ============================================================
+//
+// Optional endpoint.
+// Does NOT run automatically.
+//
 
 app.get(
   '/api/test/shopify',
   async (req, res) => {
+
     try {
+
       const data =
         await shopifyRequest(
           'shop.json'
         );
 
       res.json({
-        success: true,
+
+        success:
+          true,
+
         message:
           'Shopify API connection working',
+
         shop:
           data.shop
+
       });
+
     } catch (error) {
+
       console.error(
         'Shopify test error:',
         error.data ||
-          error.message
+        error.message
       );
 
-      res.status(
-        error.status ||
+      res
+        .status(
+          error.status ||
           500
-      ).json({
-        success: false,
-        service:
-          'shopify',
-        error:
-          error.message,
-        details:
-          error.data ||
-          null
-      });
+        )
+        .json({
+
+          success:
+            false,
+
+          service:
+            'shopify',
+
+          error:
+            error.message,
+
+          details:
+            error.data ||
+            null
+
+        });
     }
+
   }
 );
 
 // ============================================================
-// TEST SMS
+// TEST SSL WIRELESS SMS
+// ============================================================
+//
+// Example:
+//
+// /api/test/sms?phone=01741563884
+//
 // ============================================================
 
 app.get(
   '/api/test/sms',
+
   async (req, res) => {
+
     try {
+
       const phone =
         normalizePhone(
           req.query.phone
         );
 
       if (!phone) {
+
         return res
           .status(400)
           .json({
-            success: false,
+
+            success:
+              false,
+
             error:
               'Pass a valid BD phone number as ?phone=01XXXXXXXXX'
+
           });
       }
 
       const result =
         await sendSms(
+
           phone,
 
           'This is a test message from your Shopify SMS bridge.',
 
           `test-${Date.now()}`
+            .slice(0, 20)
+
         );
 
       res.json({
-        success: true,
+
+        success:
+          true,
+
         message:
           'Test SMS sent',
+
+        phone,
+
         sms_response:
           result
+
       });
+
     } catch (error) {
+
       console.error(
         'SMS test error:',
         error.data ||
-          error.message
+        error.message
       );
 
-      res.status(500).json({
-        success: false,
-        service:
-          'sms',
-        error:
-          error.message,
-        details:
-          error.data ||
-          null
-      });
+      res
+        .status(500)
+        .json({
+
+          success:
+            false,
+
+          service:
+            'sms',
+
+          error:
+            error.message,
+
+          details:
+            error.data ||
+            null
+
+        });
+
     }
+
   }
 );
 
 // ============================================================
-// GET SHOPIFY ORDERS
-// ============================================================
-
-app.get(
-  '/api/shopify/orders',
-  async (req, res) => {
-    try {
-      const limit =
-        Math.min(
-          Math.max(
-            parseInt(
-              req.query.limit,
-              10
-            ) || 10,
-            1
-          ),
-          250
-        );
-
-      const status =
-        req.query.status ||
-        'any';
-
-      const data =
-        await shopifyRequest(
-          `orders.json?status=${encodeURIComponent(
-            status
-          )}&limit=${limit}`
-        );
-
-      res.json({
-        success: true,
-
-        count:
-          data.orders?.length ||
-          0,
-
-        orders:
-          data.orders ||
-          []
-      });
-    } catch (error) {
-      console.error(
-        'Orders error:',
-        error.data ||
-          error.message
-      );
-
-      res.status(
-        error.status ||
-          500
-      ).json({
-        success: false,
-        error:
-          error.message,
-        details:
-          error.data ||
-          null
-      });
-    }
-  }
-);
-
-// ============================================================
-// GET SINGLE SHOPIFY ORDER
-// ============================================================
-
-app.get(
-  '/api/shopify/orders/:id',
-  async (req, res) => {
-    try {
-      const orderId =
-        encodeURIComponent(
-          req.params.id
-        );
-
-      const data =
-        await shopifyRequest(
-          `orders/${orderId}.json`
-        );
-
-      res.json({
-        success: true,
-        order:
-          data.order ||
-          null
-      });
-    } catch (error) {
-      console.error(
-        'Single order error:',
-        error.data ||
-          error.message
-      );
-
-      res.status(
-        error.status ||
-          500
-      ).json({
-        success: false,
-        error:
-          error.message,
-        details:
-          error.data ||
-          null
-      });
-    }
-  }
-);
-
-// ============================================================
-// PREVIEW SMS
-// ============================================================
-
-app.get(
-  '/api/shopify/order/:id/sms',
-  async (req, res) => {
-    try {
-      const orderId =
-        encodeURIComponent(
-          req.params.id
-        );
-
-      const data =
-        await shopifyRequest(
-          `orders/${orderId}.json`
-        );
-
-      if (!data.order) {
-        return res
-          .status(404)
-          .json({
-            success: false,
-            error:
-              'Shopify order not found'
-          });
-      }
-
-      const preview =
-        buildOrderSms(
-          data.order
-        );
-
-      res.json({
-        success: true,
-
-        shopify_order_id:
-          data.order.id,
-
-        source_name:
-          data.order
-            .source_name ||
-          null,
-
-        sms_preview:
-          preview
-      });
-    } catch (error) {
-      console.error(
-        'SMS preview error:',
-        error.data ||
-          error.message
-      );
-
-      res.status(
-        error.status ||
-          500
-      ).json({
-        success: false,
-        error:
-          error.message,
-        details:
-          error.data ||
-          null
-      });
-    }
-  }
-);
-
-// ============================================================
-// MANUAL SMS SEND
-// ============================================================
-//
-// This endpoint intentionally remains independent from the
-// automatic webhook filter.
-//
-// If YOU manually call this endpoint, SMS can be sent regardless
-// of the order source.
-//
-// ============================================================
-
-app.post(
-  '/api/sms/send/:shopifyOrderId',
-  async (req, res) => {
-    const shopifyOrderId =
-      req.params.shopifyOrderId;
-
-    try {
-      const data =
-        await shopifyRequest(
-          `orders/${encodeURIComponent(
-            shopifyOrderId
-          )}.json`
-        );
-
-      const shopifyOrder =
-        data.order;
-
-      if (!shopifyOrder) {
-        return res
-          .status(404)
-          .json({
-            success: false,
-            error:
-              'Shopify order not found'
-          });
-      }
-
-      const {
-        phone,
-        message
-      } =
-        buildOrderSms(
-          shopifyOrder
-        );
-
-      if (!phone) {
-        return res
-          .status(400)
-          .json({
-            success: false,
-            error:
-              'No valid phone number on this order'
-          });
-      }
-
-      const csmsId =
-        `${shopifyOrderId}-${Date.now()}`
-          .slice(0, 20);
-
-      const result =
-        await sendSms(
-          phone,
-          message,
-          csmsId
-        );
-
-      const smsResult = {
-        success: true,
-
-        shopify_order_id:
-          shopifyOrder.id,
-
-        shopify_order_name:
-          shopifyOrder.name,
-
-        source_name:
-          shopifyOrder.source_name ||
-          null,
-
-        phone,
-
-        sms_response:
-          result
-      };
-
-      submittedOrders.set(
-        String(
-          shopifyOrderId
-        ),
-        smsResult
-      );
-
-      res.json(
-        smsResult
-      );
-    } catch (error) {
-      console.error(
-        'Manual SMS send error:',
-        error.data ||
-          error.message
-      );
-
-      res.status(
-        error.status ||
-          500
-      ).json({
-        success: false,
-
-        shopify_order_id:
-          shopifyOrderId,
-
-        error:
-          error.message,
-
-        details:
-          error.data ||
-          null
-      });
-    }
-  }
-);
-
-// ============================================================
-// WEBHOOK INFO
+// WEBHOOK STATUS
 // ============================================================
 
 app.get(
   '/webhooks/orders-create',
+
   (req, res) => {
+
     res.json({
-      success: true,
+
+      success:
+        true,
 
       message:
         'Shopify orders/create webhook endpoint is active.',
@@ -1378,12 +1467,53 @@ app.get(
       endpoint:
         '/webhooks/orders-create',
 
-      status:
-        'waiting_for_shopify_webhook',
+      allowed_source:
+        'web',
 
-      server_started_at:
-        SERVER_STARTED_AT.toISOString()
+      deployment_cutoff:
+        DEPLOYMENT_CUTOFF
+          .toISOString(),
+
+      old_orders:
+        'ignored',
+
+      shopify_order_lookup:
+        false,
+
+      status:
+        'waiting_for_new_web_orders'
+
     });
+
+  }
+);
+
+// ============================================================
+// CURRENT DEPLOYMENT INFO
+// ============================================================
+
+app.get(
+  '/api/deployment',
+
+  (req, res) => {
+
+    res.json({
+
+      success:
+        true,
+
+      deployment_cutoff:
+        DEPLOYMENT_CUTOFF
+          .toISOString(),
+
+      allowed_order_source:
+        ALLOWED_ORDER_SOURCE,
+
+      processed_orders_this_deployment:
+        submittedOrders.size
+
+    });
+
   }
 );
 
@@ -1393,13 +1523,22 @@ app.get(
 
 app.use(
   (req, res) => {
-    res.status(404).json({
-      success: false,
-      error:
-        'Endpoint not found',
-      path:
-        req.originalUrl
-    });
+
+    res
+      .status(404)
+      .json({
+
+        success:
+          false,
+
+        error:
+          'Endpoint not found',
+
+        path:
+          req.originalUrl
+
+      });
+
   }
 );
 
@@ -1408,22 +1547,31 @@ app.use(
 // ============================================================
 
 app.use(
-  (
-    err,
-    req,
-    res,
-    next
-  ) => {
+  (err, req, res, next) => {
+
     console.error(
       'Unhandled error:',
       err
     );
 
-    res.status(500).json({
-      success: false,
-      error:
-        'Internal server error'
-    });
+    if (
+      res.headersSent
+    ) {
+      return next(err);
+    }
+
+    res
+      .status(500)
+      .json({
+
+        success:
+          false,
+
+        error:
+          'Internal server error'
+
+      });
+
   }
 );
 
@@ -1435,45 +1583,54 @@ app.listen(
   PORT,
   '0.0.0.0',
   () => {
-    console.log(
-      '============================================'
-    );
-
-    console.log(
-      'SHOPIFY -> SSL WIRELESS SMS BRIDGE'
-    );
 
     console.log(
       '============================================'
     );
 
     console.log(
-      `Port: ${PORT}`
-    );
-
-    console.log(
-      `Shopify: ${SHOP}.myshopify.com`
-    );
-
-    console.log(
-      `Shopify API: ${SHOPIFY_API_VERSION}`
-    );
-
-    console.log(
-      'Webhook: POST /webhooks/orders-create'
-    );
-
-    console.log(
-      `Server Started: ${SERVER_STARTED_AT.toISOString()}`
-    );
-
-    console.log(
-      'Automatic SMS: Online Store (source_name=web) only'
+      '🚀 SHOPIFY → SSL WIRELESS SMS BRIDGE'
     );
 
     console.log(
       '============================================'
     );
+
+    console.log(
+      `🌐 Port: ${PORT}`
+    );
+
+    console.log(
+      `🏪 Shopify: ${SHOP}.myshopify.com`
+    );
+
+    console.log(
+      `📡 Shopify API: ${SHOPIFY_API_VERSION}`
+    );
+
+    console.log(
+      '🌐 Allowed order source: web'
+    );
+
+    console.log(
+      `⏱️ Deployment cutoff: ${DEPLOYMENT_CUTOFF.toISOString()}`
+    );
+
+    console.log(
+      '🔔 Webhook: POST /webhooks/orders-create'
+    );
+
+    console.log(
+      '📦 Previous orders: NOT fetched'
+    );
+
+    console.log(
+      '📨 SMS data source: webhook payload only'
+    );
+
+    console.log(
+      '============================================'
+    );
+
   }
 );
-```
