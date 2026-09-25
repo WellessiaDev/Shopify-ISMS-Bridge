@@ -1,4 +1,3 @@
-```js
 const express = require('express');
 const crypto = require('crypto');
 
@@ -19,7 +18,7 @@ const SHOPIFY_WEBHOOK_SECRET =
 const SHOPIFY_API_VERSION =
   process.env.SHOPIFY_API_VERSION || '2026-07';
 
-// SSL Wireless SMS Plus (Dynamic SMS) API
+// SSL Wireless SMS Plus
 const SSL_API_URL =
   process.env.SSL_API_URL ||
   'https://smsplus.sslwireless.com/api/v3/send-sms/dynamic';
@@ -27,9 +26,7 @@ const SSL_API_URL =
 const SSL_API_TOKEN = process.env.SSL_API_TOKEN;
 const SSL_SID = process.env.SSL_SID;
 
-// Message template.
-// Placeholders:
-// {{name}} {{order_number}} {{items}} {{total}} {{currency}}
+// SMS template
 const MSG_ORDER_CREATED =
   process.env.MSG_ORDER_CREATED ||
   'Hi {{name}}, your order #{{order_number}} ({{items}}) worth {{currency}} {{total}} has been placed successfully. Thank you for shopping with us!';
@@ -41,17 +38,17 @@ const PORT = process.env.PORT || 3000;
 // ============================================================
 
 if (!CLIENT_ID || !CLIENT_SECRET) {
-  console.error('❌ Missing CLIENT_ID or CLIENT_SECRET');
+  console.error('Missing CLIENT_ID or CLIENT_SECRET');
   process.exit(1);
 }
 
 if (!SSL_API_TOKEN || !SSL_SID) {
-  console.error('❌ Missing SSL_API_TOKEN or SSL_SID');
+  console.error('Missing SSL_API_TOKEN or SSL_SID');
   process.exit(1);
 }
 
 if (!SHOPIFY_WEBHOOK_SECRET) {
-  console.error('❌ Missing SHOPIFY_WEBHOOK_SECRET');
+  console.error('Missing SHOPIFY_WEBHOOK_SECRET');
   process.exit(1);
 }
 
@@ -59,26 +56,24 @@ if (!SHOPIFY_WEBHOOK_SECRET) {
 // DEPLOYMENT CUTOFF
 // ============================================================
 //
-// Any Shopify order whose created_at is BEFORE this timestamp
-// will be ignored by the webhook handler.
-//
-// This prevents old / backlog / redelivered webhooks from
-// sending SMS after Railway restarts or redeploys.
+// Orders created BEFORE this server startup time are ignored.
+// This prevents old/backlog/redelivered webhooks from sending
+// stale SMS after a Railway restart or redeploy.
 //
 // ============================================================
 
 const SERVER_STARTED_AT = new Date();
 
 console.log(
-  `🕒 Server started at: ${SERVER_STARTED_AT.toISOString()}`
+  `Server started at: ${SERVER_STARTED_AT.toISOString()}`
 );
 
 console.log(
-  '   Orders created before this time will be skipped by the webhook.'
+  'Orders created before this time will be skipped by the webhook.'
 );
 
 // ============================================================
-// TOKEN CACHE (Shopify)
+// SHOPIFY TOKEN CACHE
 // ============================================================
 
 let SHOPIFY_TOKEN = null;
@@ -109,20 +104,19 @@ app.use(
 
 function verifyShopifyWebhook(req) {
   try {
-    const hmacHeader = req.get(
-      'X-Shopify-Hmac-Sha256'
-    );
+    const hmacHeader =
+      req.get('X-Shopify-Hmac-Sha256');
 
     if (!hmacHeader) {
       console.error(
-        '❌ Missing X-Shopify-Hmac-Sha256 header'
+        'Missing X-Shopify-Hmac-Sha256 header'
       );
       return false;
     }
 
     if (!req.rawBody) {
       console.error(
-        '❌ Raw webhook body is missing'
+        'Raw webhook body is missing'
       );
       return false;
     }
@@ -135,15 +129,11 @@ function verifyShopifyWebhook(req) {
       .update(req.rawBody)
       .digest('base64');
 
-    const receivedBuffer = Buffer.from(
-      hmacHeader,
-      'utf8'
-    );
+    const receivedBuffer =
+      Buffer.from(hmacHeader, 'utf8');
 
-    const generatedBuffer = Buffer.from(
-      generatedHash,
-      'utf8'
-    );
+    const generatedBuffer =
+      Buffer.from(generatedHash, 'utf8');
 
     if (
       receivedBuffer.length !==
@@ -180,7 +170,7 @@ async function getShopifyToken() {
   }
 
   console.log(
-    '🔐 Requesting Shopify access token...'
+    'Requesting Shopify access token...'
   );
 
   const tokenUrl =
@@ -208,12 +198,8 @@ async function getShopifyToken() {
 
   if (!response.ok) {
     console.error(
-      '❌ Shopify token response:',
-      JSON.stringify(
-        data,
-        null,
-        2
-      )
+      'Shopify token response:',
+      JSON.stringify(data, null, 2)
     );
 
     throw new Error(
@@ -240,7 +226,7 @@ async function getShopifyToken() {
       1000;
 
   console.log(
-    '✅ Shopify access token obtained'
+    'Shopify access token obtained'
   );
 
   return SHOPIFY_TOKEN;
@@ -307,7 +293,8 @@ async function shopifyRequest(
     error.status =
       response.status;
 
-    error.data = data;
+    error.data =
+      data;
 
     throw error;
   }
@@ -316,7 +303,7 @@ async function shopifyRequest(
 }
 
 // ============================================================
-// SSL WIRELESS SMS REQUEST
+// SSL WIRELESS SMS
 // ============================================================
 
 async function sendSms(
@@ -396,17 +383,8 @@ async function sendSms(
 // ============================================================
 // NORMALIZE BANGLADESH PHONE
 // ============================================================
-//
-// Examples:
-// +8801741563884  → 8801741563884
-// 8801741563884   → 8801741563884
-// 01741563884     → 8801741563884
-//
-// ============================================================
 
-function normalizePhone(
-  phone
-) {
+function normalizePhone(phone) {
   if (!phone) {
     return '';
   }
@@ -414,7 +392,6 @@ function normalizePhone(
   let value =
     String(phone).trim();
 
-  // Remove spaces, hyphens, brackets, plus signs
   value =
     value.replace(
       /[\s\-()+]/g,
@@ -438,8 +415,6 @@ function normalizePhone(
       '880' + value;
   }
 
-  // Bangladesh mobile number:
-  // 13 digits including country code
   if (
     !/^\d{13}$/.test(value)
   ) {
@@ -450,7 +425,7 @@ function normalizePhone(
 }
 
 // ============================================================
-// BUILD SMS MESSAGE FROM SHOPIFY ORDER
+// BUILD SMS
 // ============================================================
 
 function buildOrderSms(
@@ -468,15 +443,11 @@ function buildOrderSms(
     shopifyOrder.line_items ||
     [];
 
-  // ---- Recipient name ----
-
   const recipientName =
     shipping.name ||
     billing.name ||
     shopifyOrder.customer?.first_name ||
     'Customer';
-
-  // ---- Recipient phone ----
 
   const recipientPhone =
     shipping.phone ||
@@ -489,8 +460,6 @@ function buildOrderSms(
     normalizePhone(
       recipientPhone
     );
-
-  // ---- Products purchased ----
 
   const itemsDescription =
     items
@@ -509,8 +478,6 @@ function buildOrderSms(
       })
       .join(', ');
 
-  // ---- Order total ----
-
   const totalPrice =
     shopifyOrder.total_price ||
     '0.00';
@@ -518,8 +485,6 @@ function buildOrderSms(
   const currency =
     shopifyOrder.currency ||
     '';
-
-  // ---- Fill message template ----
 
   const message =
     MSG_ORDER_CREATED
@@ -571,7 +536,8 @@ app.get(
       status: 'ok',
       service:
         'Shopify SMS Bridge',
-      shop: SHOP,
+      shop:
+        SHOP,
       shopify_api_version:
         SHOPIFY_API_VERSION,
       webhook:
@@ -597,7 +563,7 @@ app.get(
 );
 
 // ============================================================
-// SHOW THIS SERVER'S OUTBOUND IP
+// OUTBOUND IP
 // ============================================================
 
 app.get(
@@ -628,7 +594,7 @@ app.get(
 );
 
 // ============================================================
-// SHOPIFY ORDERS CREATE WEBHOOK
+// SHOPIFY ORDERS/CREATE WEBHOOK
 // ============================================================
 
 app.post(
@@ -639,7 +605,7 @@ app.post(
     );
 
     console.log(
-      '📩 SHOPIFY ORDERS/CREATE WEBHOOK RECEIVED'
+      'SHOPIFY ORDERS/CREATE WEBHOOK RECEIVED'
     );
 
     console.log(
@@ -647,7 +613,7 @@ app.post(
     );
 
     // --------------------------------------------------------
-    // Verify Shopify HMAC
+    // HMAC
     // --------------------------------------------------------
 
     const valid =
@@ -655,7 +621,7 @@ app.post(
 
     if (!valid) {
       console.error(
-        '❌ Invalid Shopify webhook signature'
+        'Invalid Shopify webhook signature'
       );
 
       return res.status(401).json({
@@ -666,7 +632,7 @@ app.post(
     }
 
     console.log(
-      '✅ Shopify webhook signature verified'
+      'Shopify webhook signature verified'
     );
 
     const shopifyOrder =
@@ -677,7 +643,7 @@ app.post(
       !shopifyOrder.id
     ) {
       console.error(
-        '❌ Invalid Shopify order webhook'
+        'Invalid Shopify order webhook'
       );
 
       return res.status(400).json({
@@ -693,18 +659,18 @@ app.post(
       );
 
     console.log(
-      '🛒 Shopify Order ID:',
+      'Shopify Order ID:',
       shopifyOrderId
     );
 
     console.log(
-      '🧾 Shopify Order Name:',
+      'Shopify Order Name:',
       shopifyOrder.name ||
         'N/A'
     );
 
     // ========================================================
-    // DEPLOYMENT CUTOFF CHECK
+    // DEPLOYMENT CUTOFF
     // ========================================================
 
     const orderCreatedAt =
@@ -721,7 +687,7 @@ app.post(
       )
     ) {
       console.log(
-        '⏭️ Skipping SMS — order created_at is missing or invalid'
+        'Skipping SMS - invalid or missing created_at'
       );
 
       return res.status(200).json({
@@ -735,12 +701,12 @@ app.post(
     }
 
     console.log(
-      '🕒 Order Created At:',
+      'Order Created At:',
       orderCreatedAt.toISOString()
     );
 
     console.log(
-      '🕒 Server Started At:',
+      'Server Started At:',
       SERVER_STARTED_AT.toISOString()
     );
 
@@ -749,7 +715,7 @@ app.post(
       SERVER_STARTED_AT
     ) {
       console.log(
-        '⏭️ Skipping SMS — order was created before server startup'
+        'Skipping SMS - order was created before server startup'
       );
 
       return res.status(200).json({
@@ -770,19 +736,11 @@ app.post(
     }
 
     console.log(
-      '✅ Order passed deployment cutoff'
+      'Order passed deployment cutoff'
     );
 
     // ========================================================
     // ONLINE STORE / WEB ORDER CHECK
-    // ========================================================
-    //
-    // Only orders with source_name === "web"
-    // will receive automatic SMS.
-    //
-    // Manual/Admin/Draft/other source orders
-    // will be skipped.
-    //
     // ========================================================
 
     const orderSource =
@@ -790,7 +748,7 @@ app.post(
       '';
 
     console.log(
-      '🔗 Order Source:',
+      'Order Source:',
       orderSource ||
         'N/A'
     );
@@ -800,7 +758,7 @@ app.post(
       'web'
     ) {
       console.log(
-        `⏭️ Skipping SMS — order source is "${orderSource}", not an online store order`
+        `Skipping SMS - order source is "${orderSource}", not web`
       );
 
       return res.status(200).json({
@@ -819,11 +777,11 @@ app.post(
     }
 
     console.log(
-      '✅ Online Store/Web order confirmed'
+      'Online Store/Web order confirmed'
     );
 
     console.log(
-      '📨 Automatic SMS is allowed for this order'
+      'Automatic SMS is allowed'
     );
 
     // ========================================================
@@ -836,7 +794,7 @@ app.post(
       )
     ) {
       console.log(
-        '⚠️ SMS already sent for this order'
+        'SMS already sent for this order'
       );
 
       return res.status(200).json({
@@ -852,7 +810,7 @@ app.post(
     }
 
     // ========================================================
-    // BUILD SMS FROM ORDER
+    // BUILD SMS
     // ========================================================
 
     const {
@@ -866,34 +824,29 @@ app.post(
       );
 
     console.log(
-      '👤 Recipient:',
+      'Recipient:',
       recipientName
     );
 
     console.log(
-      '📱 Phone:',
+      'Phone:',
       phone ||
         'MISSING/INVALID'
     );
 
     console.log(
-      '🛍️ Items:',
+      'Items:',
       itemsDescription ||
         'N/A'
     );
 
     console.log(
-      '💬 Message:',
+      'Message:',
       message
     );
 
     // ========================================================
-    // ACKNOWLEDGE SHOPIFY QUICKLY
-    // ========================================================
-    //
-    // Respond to Shopify before sending SMS so the webhook
-    // doesn't time out and get retried.
-    //
+    // ACKNOWLEDGE SHOPIFY
     // ========================================================
 
     res.status(200).json({
@@ -910,7 +863,7 @@ app.post(
 
     if (!phone) {
       console.warn(
-        `⚠️ No valid phone number for order ${shopifyOrderId}, skipping SMS`
+        `No valid phone number for order ${shopifyOrderId}, skipping SMS`
       );
 
       return;
@@ -926,7 +879,7 @@ app.post(
 
     try {
       console.log(
-        '\n📨 Sending SMS via SSL Wireless...'
+        'Sending SMS via SSL Wireless...'
       );
 
       const result =
@@ -960,15 +913,7 @@ app.post(
       );
 
       console.log(
-        '\n============================================'
-      );
-
-      console.log(
-        '✅ SHOPIFY WEB ORDER → SMS SUCCESS'
-      );
-
-      console.log(
-        '============================================'
+        'SHOPIFY WEB ORDER -> SMS SUCCESS'
       );
 
       console.log(
@@ -980,7 +925,7 @@ app.post(
       );
     } catch (error) {
       console.error(
-        '\n❌ SMS SEND FAILED'
+        'SMS SEND FAILED'
       );
 
       console.error(
@@ -1005,7 +950,7 @@ app.post(
 );
 
 // ============================================================
-// TEST SHOPIFY CONNECTION
+// TEST SHOPIFY
 // ============================================================
 
 app.get(
@@ -1049,7 +994,7 @@ app.get(
 );
 
 // ============================================================
-// TEST SSL WIRELESS SMS
+// TEST SMS
 // ============================================================
 
 app.get(
@@ -1141,9 +1086,11 @@ app.get(
 
       res.json({
         success: true,
+
         count:
           data.orders?.length ||
           0,
+
         orders:
           data.orders ||
           []
@@ -1217,7 +1164,7 @@ app.get(
 );
 
 // ============================================================
-// PREVIEW SMS FOR A GIVEN ORDER
+// PREVIEW SMS
 // ============================================================
 
 app.get(
@@ -1286,14 +1233,14 @@ app.get(
 );
 
 // ============================================================
-// MANUALLY (RE)SEND SMS FOR A GIVEN SHOPIFY ORDER
+// MANUAL SMS SEND
 // ============================================================
 //
 // This endpoint intentionally remains independent from the
 // automatic webhook filter.
 //
-// If you manually call this endpoint, it will send the SMS
-// regardless of the order source.
+// If YOU manually call this endpoint, SMS can be sent regardless
+// of the order source.
 //
 // ============================================================
 
@@ -1384,7 +1331,7 @@ app.post(
       );
     } catch (error) {
       console.error(
-        '❌ Manual SMS send error:',
+        'Manual SMS send error:',
         error.data ||
           error.message
       );
@@ -1410,7 +1357,7 @@ app.post(
 );
 
 // ============================================================
-// WEBHOOK TEST INFORMATION
+// WEBHOOK INFO
 // ============================================================
 
 app.get(
@@ -1493,7 +1440,7 @@ app.listen(
     );
 
     console.log(
-      '🚀 SHOPIFY → SSL WIRELESS SMS BRIDGE'
+      'SHOPIFY -> SSL WIRELESS SMS BRIDGE'
     );
 
     console.log(
@@ -1501,27 +1448,27 @@ app.listen(
     );
 
     console.log(
-      `🌐 Port: ${PORT}`
+      `Port: ${PORT}`
     );
 
     console.log(
-      `🏪 Shopify: ${SHOP}.myshopify.com`
+      `Shopify: ${SHOP}.myshopify.com`
     );
 
     console.log(
-      `📡 Shopify API: ${SHOPIFY_API_VERSION}`
+      `Shopify API: ${SHOPIFY_API_VERSION}`
     );
 
     console.log(
-      '🔔 Webhook: POST /webhooks/orders-create'
+      'Webhook: POST /webhooks/orders-create'
     );
 
     console.log(
-      `🕒 Server Started: ${SERVER_STARTED_AT.toISOString()}`
+      `Server Started: ${SERVER_STARTED_AT.toISOString()}`
     );
 
     console.log(
-      '📱 Automatic SMS: Online Store (source_name=web) only'
+      'Automatic SMS: Online Store (source_name=web) only'
     );
 
     console.log(
