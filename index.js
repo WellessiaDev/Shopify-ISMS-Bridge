@@ -390,6 +390,20 @@ app.post('/webhooks/orders-create', async (req, res) => {
   console.log('🛒 Shopify Order ID:', shopifyOrderId);
   console.log('🧾 Shopify Order Name:', shopifyOrder.name || 'N/A');
 
+  // ---- Only send SMS for Online Store (web) orders, skip manual/draft orders ----
+  const orderSource = shopifyOrder.source_name || '';
+  console.log('🔗 Order Source:', orderSource);
+
+  if (orderSource !== 'web') {
+    console.log(`⏭️  Skipping SMS — order source is "${orderSource}", not an online store order`);
+    return res.status(200).json({
+      success: true,
+      skipped: true,
+      reason: `order source is "${orderSource}", not web`,
+      shopify_order_id: shopifyOrderId
+    });
+  }
+
   // ---- Duplicate protection ----
   if (submittedOrders.has(shopifyOrderId)) {
     console.log('⚠️ SMS already sent for this order');
