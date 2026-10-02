@@ -36,8 +36,7 @@ const SSL_SID = process.env.SSL_SID;
 
 const MSG_ORDER_CREATED =
   process.env.MSG_ORDER_CREATED ||
-  '{{name}}, আপনার অর্ডার {{order_number}} কনফার্ম হয়েছে
-ধন্যবাদ!';
+  '{{name}}, আপনার অর্ডার {{order_number}} কনফার্ম হয়েছে,ধন্যবাদ!';
 
 const PORT = process.env.PORT || 3000;
 
