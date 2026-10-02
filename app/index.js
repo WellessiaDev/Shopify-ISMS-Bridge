@@ -36,7 +36,8 @@ const SSL_SID = process.env.SSL_SID;
 
 const MSG_ORDER_CREATED =
   process.env.MSG_ORDER_CREATED ||
-  'Hi {{name}}, your order #{{order_number}} ({{items}}) worth {{currency}} {{total}} has been placed successfully. Thank you for shopping with us!';
+  '{{name}}, আপনার অর্ডার {{order_number}} কনফার্ম হয়েছে
+ধন্যবাদ!';
 
 const PORT = process.env.PORT || 3000;
 
@@ -645,9 +646,9 @@ function buildOrderSms(
 
   const orderNumber =
 
-    shopifyOrder.order_number ||
-
     shopifyOrder.name ||
+
+    shopifyOrder.order_number ||
 
     shopifyOrder.id;
 
